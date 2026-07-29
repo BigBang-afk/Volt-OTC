@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: volt-otc
+    env: node
+    plan: free
+    buildCommand: cd frontend && npm install && npm run build && cd ../backend && npm install
+    startCommand: cd backend && npm start
+    envVars:
+      - key: ADMIN_KEY
+        sync: false
+      - key: NODE_VERSION
+        value: 20.11.0
