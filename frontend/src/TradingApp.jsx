@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
-import { api, connectSocket } from "./api.js";
+import React, { useEffect, useState } from "react";
+import { api } from "./api.js";
 import Chart from "./components/Chart.jsx";
 import PairList from "./components/PairList.jsx";
 import Timeframes from "./components/Timeframes.jsx";
@@ -7,17 +7,17 @@ import TradePanel from "./components/TradePanel.jsx";
 import TradeHistory from "./components/TradeHistory.jsx";
 import AdminPanel from "./components/AdminPanel.jsx";
 
+const PRICE_POLL_MS = 1500;
+const TRADES_POLL_MS = 2000;
+
 export default function TradingApp() {
   const [pairs, setPairs] = useState([]);
   const [symbol, setSymbol] = useState(null);
   const [timeframe, setTimeframe] = useState("m1");
-  const [liveCandle, setLiveCandle] = useState(null);
   const [prices, setPrices] = useState({}); // symbol -> {price}
   const [account, setAccount] = useState({ demoBalance: 0 });
   const [trades, setTrades] = useState([]);
   const [showAdmin, setShowAdmin] = useState(false);
-
-  const wsRef = useRef(null);
 
   // Initial load
   useEffect(() => {
@@ -29,35 +29,35 @@ export default function TradingApp() {
     api.getTrades().then(setTrades);
   }, []);
 
-  // WebSocket live feed
+  // Poll live prices for the sidebar + ticker (also lets pairs list pick up admin changes)
   useEffect(() => {
-    const ws = connectSocket((event) => {
-      if (event.type === "tick") {
-        setPrices((prev) => ({ ...prev, [event.symbol]: { price: event.price } }));
+    const id = setInterval(async () => {
+      try {
+        const list = await api.getPairs();
+        setPairs(list);
+        const map = {};
+        for (const p of list) map[p.symbol] = { price: p.price };
+        setPrices(map);
+      } catch (e) {
+        console.error("price poll failed", e);
       }
-      if (event.type === "trade_resolved") {
-        setTrades((prev) => prev.map((t) => (t.id === event.trade.id ? event.trade : t)));
-        api.getAccount().then(setAccount);
-      }
-    });
-    wsRef.current = ws;
-    return () => ws.close();
+    }, PRICE_POLL_MS);
+    return () => clearInterval(id);
   }, []);
 
-  // Update live candle for the chart whenever a tick arrives for the currently selected symbol/timeframe
+  // Poll trades + account (server resolves due trades lazily whenever these are fetched)
   useEffect(() => {
-    if (!wsRef.current) return;
-    const ws = wsRef.current;
-    const handler = (evt) => {
-      const event = JSON.parse(evt.data);
-      if (event.type === "tick" && event.symbol === symbol) {
-        const upd = event.candles?.[timeframe];
-        if (upd) setLiveCandle(upd.candle);
+    const id = setInterval(async () => {
+      try {
+        const [list, acc] = await Promise.all([api.getTrades(), api.getAccount()]);
+        setTrades(list);
+        setAccount(acc);
+      } catch (e) {
+        console.error("trades poll failed", e);
       }
-    };
-    ws.addEventListener("message", handler);
-    return () => ws.removeEventListener("message", handler);
-  }, [symbol, timeframe]);
+    }, TRADES_POLL_MS);
+    return () => clearInterval(id);
+  }, []);
 
   function handleTradePlaced(trade) {
     setTrades((prev) => [trade, ...prev]);
@@ -102,7 +102,7 @@ export default function TradingApp() {
                     {currentPrice?.toFixed ? currentPrice.toFixed(currentPrice >= 100 ? 2 : 5) : "—"}
                   </div>
                 </div>
-                <Chart symbol={symbol} timeframe={timeframe} liveCandle={liveCandle} />
+                <Chart symbol={symbol} timeframe={timeframe} />
               </>
             )}
           </div>

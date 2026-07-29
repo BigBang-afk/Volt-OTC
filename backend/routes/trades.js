@@ -1,27 +1,20 @@
 import { Router } from "express";
-import { state } from "../store.js";
-import { openTrade, listTrades, resetDemoAccount } from "../tradeEngine.js";
+import { listTrades, openTrade } from "../../lib/tradeStore.js";
 
 const router = Router();
 
-router.get("/account", (req, res) => {
-  res.json(state.account);
+router.get("/", async (req, res) => {
+  try {
+    res.json(await listTrades(Number(req.query.limit) || 100));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-router.post("/account/reset", (req, res) => {
-  const balance = Number(req.body?.balance) || 10000;
-  resetDemoAccount(balance);
-  res.json(state.account);
-});
-
-router.get("/", (req, res) => {
-  res.json(listTrades(Number(req.query.limit) || 100));
-});
-
-router.post("/", (req, res) => {
+router.post("/", async (req, res) => {
   try {
     const { symbol, direction, amount, expirySeconds } = req.body;
-    const trade = openTrade({ symbol, direction, amount, expirySeconds });
+    const trade = await openTrade({ symbol, direction, amount, expirySeconds });
     res.status(201).json(trade);
   } catch (e) {
     res.status(400).json({ error: e.message });

@@ -2,7 +2,9 @@ import React, { useEffect, useRef } from "react";
 import { createChart } from "lightweight-charts";
 import { api } from "../api.js";
 
-export default function Chart({ symbol, timeframe, liveCandle }) {
+const POLL_MS = 1500;
+
+export default function Chart({ symbol, timeframe }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
@@ -39,24 +41,32 @@ export default function Chart({ symbol, timeframe, liveCandle }) {
     return () => chart.remove();
   }, []);
 
-  // Load history whenever symbol/timeframe changes
+  // Load history immediately on symbol/timeframe change, then poll for updates.
   useEffect(() => {
     let cancelled = false;
-    api.getCandles(symbol, timeframe, 300).then((candles) => {
-      if (cancelled || !seriesRef.current) return;
-      seriesRef.current.setData(candles);
-      chartRef.current.timeScale().fitContent();
-    });
+    let first = true;
+
+    async function refresh() {
+      try {
+        const candles = await api.getCandles(symbol, timeframe, 300);
+        if (cancelled || !seriesRef.current) return;
+        seriesRef.current.setData(candles);
+        if (first) {
+          chartRef.current.timeScale().fitContent();
+          first = false;
+        }
+      } catch (e) {
+        console.error("candle refresh failed", e);
+      }
+    }
+
+    refresh();
+    const id = setInterval(refresh, POLL_MS);
     return () => {
       cancelled = true;
+      clearInterval(id);
     };
   }, [symbol, timeframe]);
-
-  // Apply live updates as they stream in
-  useEffect(() => {
-    if (!liveCandle || !seriesRef.current) return;
-    seriesRef.current.update(liveCandle);
-  }, [liveCandle]);
 
   return <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />;
 }

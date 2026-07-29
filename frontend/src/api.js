@@ -12,11 +12,11 @@ export const api = {
   getPairs: () => fetch(`${BASE}/pairs`).then(handle),
   getTimeframes: () => fetch(`${BASE}/pairs/timeframes`).then(handle),
   getCandles: (symbol, timeframe, limit = 300) =>
-    fetch(`${BASE}/pairs/${encodeURIComponent(symbol)}/candles/${timeframe}?limit=${limit}`).then(handle),
+    fetch(`${BASE}/pairs/candles?symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}&limit=${limit}`).then(handle),
 
-  getAccount: () => fetch(`${BASE}/trades/account`).then(handle),
+  getAccount: () => fetch(`${BASE}/account`).then(handle),
   resetAccount: (balance = 10000) =>
-    fetch(`${BASE}/trades/account/reset`, {
+    fetch(`${BASE}/account/reset`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ balance })
@@ -40,33 +40,20 @@ export const api = {
       body: JSON.stringify(payload)
     }).then(handle),
   adminUpdateAlgorithm: (key, symbol, algorithm) =>
-    fetch(`${BASE}/admin/pairs/${encodeURIComponent(symbol)}/algorithm`, {
+    fetch(`${BASE}/admin/pairs?symbol=${encodeURIComponent(symbol)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", "x-admin-key": key },
       body: JSON.stringify(algorithm)
     }).then(handle),
   adminUpdatePayout: (key, symbol, payout) =>
-    fetch(`${BASE}/admin/pairs/${encodeURIComponent(symbol)}/payout`, {
+    fetch(`${BASE}/admin/pairs?symbol=${encodeURIComponent(symbol)}&field=payout`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", "x-admin-key": key },
       body: JSON.stringify({ payout })
     }).then(handle),
   adminDeletePair: (key, symbol) =>
-    fetch(`${BASE}/admin/pairs/${encodeURIComponent(symbol)}`, {
+    fetch(`${BASE}/admin/pairs?symbol=${encodeURIComponent(symbol)}`, {
       method: "DELETE",
       headers: { "x-admin-key": key }
     }).then(handle)
 };
-
-export function connectSocket(onMessage) {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onmessage = (evt) => {
-    try {
-      onMessage(JSON.parse(evt.data));
-    } catch (e) {
-      console.error("bad ws message", e);
-    }
-  };
-  return ws;
-}

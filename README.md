@@ -3,131 +3,140 @@
 A full-stack demo trading platform (Quotex-style) with:
 
 - **OTC pairs** with a fully **admin-configurable price algorithm** (volatility, trend bias, mean reversion, spread) per pair
-- **Live candlestick charts** (via `lightweight-charts`, the same library TradingView open-sourced)
-- **10 timeframes**: H4, H1, M30, M15, M5, M1, S30, S15, S10, S5
+- **Live candlestick charts** (via `lightweight-charts`) across **10 timeframes**: H4, H1, M30, M15, M5, M1, S30, S15, S10, S5
 - **Demo account** with virtual balance, buy (UP) / sell (DOWN) trades, configurable payout %, automatic trade resolution at expiry
 - **Admin panel** to tune each pair's algorithm live, change payout, and add/remove OTC pairs
-- Real-time price streaming over WebSocket
+- **Landing page** at `/` with a "Launch Demo" button into the dashboard at `#/app`
+- Real-time-feeling price updates via **polling** (no WebSocket) — this is what makes it deployable on serverless platforms like Vercel
 
-This is a **custom build with the same functionality you described** — not a copy of Quotex's code, brand, or design assets (which are their proprietary IP). Everything here — architecture, code, styling, brand name — is original so you can freely extend, rebrand, and deploy it.
+This is a **custom build with the same functionality you described** — not a copy of Quotex's code, brand, or design assets.
 
-## Architecture
+## How the price engine works (read this first)
+
+The price engine is a **pure function of time**, not a background process. Given a pair's config and a timestamp, `generateCandles()` and `priceAtTime()` always return the same result for the same inputs — deterministic, seeded pseudo-randomness (see `lib/hash.js` and `lib/priceModel.js`).
+
+This matters because serverless functions (Vercel, etc.) don't stay running in the background — there's no persistent process to "tick" a price forward every second. By making price a pure function of the clock instead of accumulated state, **any** request, from **any** function instance, at **any** time, reconstructs the exact same price/candle history — no shared memory or timer required. It's also why trade resolution doesn't need a background loop: any request that touches trades (`GET /api/trades`, `GET /api/account`) lazily checks for expired trades and resolves them using the pure price function evaluated at the exact expiry timestamp.
+
+The frontend polls REST endpoints (chart candles every ~1.5s, prices/trades every ~1.5-2s) instead of holding a WebSocket open — a deliberate trade-off so the whole thing runs on Vercel's free tier.
+
+**Known trade-off:** each timeframe (H4, M1, S5, etc.) is generated independently rather than aggregated from a finer one, and changing a pair's algorithm in the admin panel affects the *entire* recomputed history for that pair, not just going forward. That's fine for a demo/practice platform; a production system would snapshot history in a real database instead of recomputing it live.
+
+## Project structure
 
 ```
-trading-platform/
-├── backend/              Node.js + Express + ws (WebSocket)
-│   ├── server.js         HTTP + WS server, wires everything together
-│   ├── priceEngine.js    Tick generator + candle aggregator for all timeframes
-│   ├── tradeEngine.js    Opens/resolves demo trades (binary win/loss/tie logic)
-│   ├── store.js          Lightweight JSON-file persistence (no DB server needed)
-│   └── routes/
-│       ├── pairs.js      GET pairs, GET candle history
-│       ├── trades.js     Place trades, get account/trade history
-│       └── admin.js      Admin-only: tune algorithm, add/remove pairs, payout
-└── frontend/             React + Vite
-    └── src/
-        ├── App.jsx               Layout + state + WebSocket wiring
-        ├── api.js                REST + WebSocket client helpers
-        └── components/
-            ├── Chart.jsx          Candlestick chart
-            ├── PairList.jsx       OTC pair sidebar
-            ├── Timeframes.jsx     Timeframe selector strip
-            ├── TradePanel.jsx     Amount/expiry/UP/DOWN controls
-            ├── TradeHistory.jsx   Live trade list with countdown
-            └── AdminPanel.jsx     Algorithm tuning + pair management
+lib/                  Shared logic used by BOTH deployment targets below
+  hash.js              Deterministic seeded PRNG/Gaussian
+  priceModel.js        generateCandles() / priceAtTime() — the pure price function
+  kv.js                Storage: Upstash/Vercel KV REST API, or local JSON file
+  pairsStore.js        OTC pair config + admin overrides
+  tradeStore.js        Demo account + trades, lazy resolution
+
+api/                  Vercel serverless functions (deploy target: Vercel)
+  pairs.js, candles.js, trades.js, account.js, admin.js
+
+backend/               Express server (deploy target: Render / Railway / local / Docker)
+  server.js            Same routes as /api, reusing the same /lib
+  routes/*.js
+
+frontend/              React + Vite (same build serves either backend)
+  src/
+    App.jsx             Router: landing page vs trading app (hash-based, no server routing needed)
+    LandingPage.jsx      Marketing homepage
+    TradingApp.jsx       The trading dashboard (polling-based)
+    api.js               REST client (works against either backend — same route shapes)
+    components/          Chart, PairList, Timeframes, TradePanel, TradeHistory, AdminPanel
 ```
 
-### How the OTC price algorithm works
-
-Real forex/crypto markets close on weekends, so OTC pairs use a **synthetic price generator** — this is standard industry practice, not unique to any one broker. Each pair has:
-
-- `volatility` — standard deviation of the random price move each tick
-- `trendBias` — constant drift added every tick (push price up/down over time)
-- `meanReversion` — how strongly price is pulled back toward its anchor (keeps it from drifting to 0 or infinity)
-- `spread` — displayed bid/ask spread
-- `tickMs` — how often the price updates (default 1000ms)
-
-The admin panel lets you change all of these **live**, per pair, with results visible on the chart within a second.
-
-### Trade resolution
-
-A trade is opened with `{ symbol, direction: 'up'|'down', amount, expirySeconds }`. The stake is deducted from the demo balance immediately. A background loop checks every second for trades whose expiry has passed, compares the exit price to the entry price, and credits `amount + amount * payout%` on a win, refunds on an exact tie, or keeps the stake on a loss.
-
-## What's new: landing page + single-URL deployment
-
-- `/` now shows a marketing landing page (`LandingPage.jsx`) with a "Launch Demo" button.
-- `/#/app` (or clicking Launch) shows the actual trading dashboard.
-- The backend now serves the built frontend directly, so **the whole thing — landing page, trading app, API, WebSocket — is one deployable service with one URL.**
-
-### Deploying it live
-
-I can't push this to a live URL myself — I don't have network/internet access in the environment I built this in, and deploying requires an account on a hosting provider plus (usually) a GitHub repo connection. Here's the fastest path to get a real URL yourself, using [Render](https://render.com) (has a free tier, no credit card required for this use case):
-
-1. Push this project to a GitHub repo (create one on github.com, then `git init && git add . && git commit -m "init" && git remote add origin <your-repo-url> && git push -u origin main` from the project root).
-2. Go to [render.com](https://render.com) → New → Blueprint → connect your repo. Render will detect `render.yaml` at the root and configure the service automatically.
-3. Set the `ADMIN_KEY` environment variable in Render's dashboard to your own secret (don't leave it as `admin123`).
-4. Click deploy. Render will run the build (compiles the frontend, installs backend deps) and start the server. You'll get a URL like `https://volt-otc.onrender.com`.
-
-**Alternative — Docker (Railway, Fly.io, or any Docker host):** a `Dockerfile` at the project root builds the frontend and runs the backend serving it. Most Docker-based hosts will auto-detect it — just point them at the repo and set `PORT`/`ADMIN_KEY` env vars as needed.
-
-**Local production test** (before deploying, to make sure the build works):
-```bash
-cd frontend && npm install && npm run build
-cd ../backend && npm install && npm start
-```
-Then open `http://localhost:4000` — you should see the landing page, and `http://localhost:4000/#/app` should show the trading dashboard, all from the one server.
-
-
-
-You'll need [Node.js 18+](https://nodejs.org) installed.
-
-### 1. Backend
+## Running it locally
 
 ```bash
-cd backend
-npm install
-npm start
+cd backend && npm install && npm start      # API on :4000
+cd frontend && npm install && npm run dev   # UI on :5173 (proxies /api to :4000)
 ```
+Open `http://localhost:5173`.
 
-This starts the API + WebSocket server on `http://localhost:4000`.
+Admin key defaults to `admin123` — set your own with `ADMIN_KEY=yourkey npm start` in `backend/`.
 
-### 2. Frontend
+## Deploying to Netlify (no credit card required) — recommended
 
-In a new terminal:
+Netlify's free tier doesn't ask for a card, and this project already includes everything it needs (`netlify.toml` + `netlify/functions/`).
+
+### 1. Storage: Upstash Redis (free, also no card)
+
+Netlify Functions don't share a filesystem between invocations either, so you still need Upstash for storage — same as the Vercel path:
+1. Sign up free at [upstash.com](https://upstash.com)
+2. Create a Redis database (any name/region, type Regional)
+3. On the database page, find the **REST API** section, copy `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`
+
+### 2. Push to GitHub (if you haven't already)
 
 ```bash
-cd frontend
-npm install
-npm run dev
+git init
+git add .
+git commit -m "Volt OTC"
+git remote add origin https://github.com/YOUR_USERNAME/volt-otc.git
+git branch -M main
+git push -u origin main
 ```
+(No git installed or terminal issues? You can also create the repo on github.com and drag-and-drop upload all the files through the browser — no command line needed.)
 
-Open the URL Vite prints (usually `http://localhost:5173`). The Vite dev server proxies `/api` and `/ws` to the backend automatically.
+### 3. Deploy on Netlify
 
-### 3. Admin access
+1. Go to [app.netlify.com](https://app.netlify.com) → sign up/log in with GitHub (no card needed)
+2. Click **Add new site** → **Import an existing project** → **GitHub** → select your `volt-otc` repo
+3. Netlify should auto-detect the build settings from `netlify.toml` (build command, publish directory, functions directory) — you shouldn't need to type anything in manually
+4. Before deploying, click **Add environment variables** and add:
+   - `ADMIN_KEY` → your own secret
+   - `UPSTASH_REDIS_REST_URL` → from Upstash
+   - `UPSTASH_REDIS_REST_TOKEN` → from Upstash
+5. Click **Deploy site**
 
-Click **⚙ Admin** in the top bar. Default admin key is:
+You'll get a URL like `https://volt-otc.netlify.app` in a couple of minutes.
 
-```
-admin123
-```
+## Deploying to Vercel (also free, but some accounts hit a card-verification gate)
 
-Change it by setting the `ADMIN_KEY` environment variable before starting the backend:
+### 1. You'll need a place to persist data: Upstash Redis (free tier)
+
+Vercel functions don't share a filesystem between requests, so the local JSON-file storage won't work there. Sign up free at [upstash.com](https://upstash.com), create a Redis database, and copy the **REST URL** and **REST TOKEN** from its dashboard.
+
+(If instead you add Vercel's own "KV" storage add-on from your Vercel project dashboard, it sets the equivalent env vars automatically — either works, the code checks for both naming conventions.)
+
+### 2. Push this project to GitHub
 
 ```bash
-ADMIN_KEY=your-secret-key npm start
+git init
+git add .
+git commit -m "Volt OTC"
+git remote add origin https://github.com/YOUR_USERNAME/volt-otc.git
+git branch -M main
+git push -u origin main
 ```
+
+### 3. Deploy on Vercel
+
+1. Go to [vercel.com/new](https://vercel.com/new), import your GitHub repo.
+2. Vercel will detect `vercel.json` (builds the frontend, serves `frontend/dist`, auto-detects `/api/*.js` as serverless functions). You shouldn't need to change any framework settings.
+3. Before deploying, add these **Environment Variables** in the Vercel project settings:
+   - `ADMIN_KEY` → your own admin secret (don't leave it as `admin123`)
+   - `UPSTASH_REDIS_REST_URL` → from your Upstash dashboard
+   - `UPSTASH_REDIS_REST_TOKEN` → from your Upstash dashboard
+4. Click **Deploy**.
+
+You'll get a URL like `https://volt-otc.vercel.app`. Open it — that's the landing page; click "Launch Demo" for the dashboard, and "⚙ Admin" (using the key you set) to tune the OTC algorithm live.
+
+### Alternative: Render (persistent server, simpler storage)
+
+`render.yaml` at the repo root still works for a traditional persistent-server deploy — no Upstash needed there since Render gives you a real disk for the local JSON-file storage. Same repo, either path.
 
 ## Extending this toward a production platform
 
-This is a solid MVP foundation. Before handling real users or real money, you'd want to add:
-
-1. **Real authentication** — the admin route uses a single shared secret; you'd want real user accounts, hashed passwords, JWT/session auth, and role-based access (admin vs trader).
-2. **A real database** — the JSON file store is fine for a demo; swap in Postgres/MySQL for concurrent users and data integrity (the code is structured so this is a contained change in `store.js`).
-3. **Non-OTC "real" pairs** — wire in a live market data feed (e.g. a forex/crypto data provider) for pairs that mirror actual markets, separate from the synthetic OTC pairs.
-4. **Real-money handling** — deposits, withdrawals, KYC — is a heavily regulated area (binary options are restricted or banned in many countries, including the US, EU, and UK for retail traders). Please check the regulatory status in your target jurisdictions before offering this beyond a demo/paper-trading product; the legal requirements are substantial and non-negotiable in most places.
+1. **Real authentication** — the admin route uses a single shared secret; add real user accounts, hashed passwords, and role-based access before this handles anyone but you.
+2. **A real database** — Upstash/local-file storage is fine for a demo; a relational database (Postgres) would give you proper querying, indexing, and data integrity for real user/trade volume.
+3. **Non-OTC "real" pairs** — wire in a live market data feed for pairs that mirror actual markets, separate from synthetic OTC pairs.
+4. **Real-money handling** — deposits, withdrawals, KYC — is heavily regulated. Binary options are restricted or banned for retail traders in many countries (US, EU, UK among them). Check the regulatory status in your target jurisdictions before offering this beyond a demo/paper-trading product.
 5. **Rate limiting / anti-abuse** on trade placement and admin endpoints.
-6. **Horizontal scaling** — move the WebSocket broadcast to Redis pub/sub if you run multiple backend instances.
+6. **Snapshot real history** — store actual candle closes as they happen (via a cron job or on first request per period) rather than recomputing the whole synthetic history live, so admin algorithm changes don't retroactively rewrite the past.
 
-## Notes on the "algorithm" controls
+## A note on the "algorithm" controls
 
-Because OTC pricing is synthetic, whoever controls the algorithm controls the odds — that's true of every broker offering OTC/synthetic instruments, not just this codebase. If you build this out further, consider being transparent with users about how OTC pricing is generated, since regulators in a number of countries scrutinize this closely for retail-facing platforms.
+Because OTC pricing here is synthetic, whoever controls the algorithm controls the odds — true of any broker offering OTC/synthetic instruments, not unique to this codebase. If you build this further, consider being transparent with users about how OTC pricing is generated; regulators in a number of countries scrutinize this closely for retail-facing platforms.
